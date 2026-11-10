@@ -36,6 +36,8 @@ services:
     ports:
       - "5019:5019"
       - "3000:3000"   # publicado aqui porque la web comparte la red de la API
+    volumes:
+      - media:/app/wwwroot/media   # las fotos sobreviven a recrear el contenedor
 
   web:
     build:
@@ -47,3 +49,6 @@ services:
       - api
     # Comparte la red de la API: el SSR de Next y el navegador usan la misma URL (localhost:5019).
     network_mode: "service:api"
+
+volumes:
+  media:

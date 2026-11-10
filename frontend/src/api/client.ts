@@ -639,7 +639,7 @@ class ApiClient {
     page?: number; pageSize?: number; search?: string; modalidad?: string; estado?: string; tipo?: string;
     pais?: string; departamento?: string; ciudad?: string; barrio?: string; moneda?: string;
     precioDesde?: number; precioHasta?: number; areaDesde?: number; areaHasta?: number;
-    habitaciones?: number; banos?: number; parqueaderos?: number; orden?: string; papelera?: boolean; codigoWasi?: string; construidoDesde?: number; etiqueta?: string; asesorResponsableId?: string;
+    habitaciones?: number; banos?: number; parqueaderos?: number; orden?: string; papelera?: boolean; construidoDesde?: number; etiqueta?: string; asesorResponsableId?: string;
   } = {}) {
     const params = new URLSearchParams()
     Object.entries(filters).forEach(([key, value]) => { if (value !== undefined && value !== "") params.set(key, String(value)) })
