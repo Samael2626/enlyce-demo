@@ -1,0 +1,336 @@
+using Enlyce.Application.Abstractions;
+using Enlyce.Application.Security;
+using Enlyce.Domain.Entities;
+using Enlyce.Domain.Errors;
+using Enlyce.Domain.Ports;
+using Enlyce.Domain.ValueObjects;
+
+namespace Enlyce.Application.UseCases.CreateLead;
+
+// Criterio de correos repetidos (2026-09-21)
+//
+// Antes, un segundo lead con el mismo correo lanzaba InvalidOperationException
+// y el visitante recibia un error generico. Un comprador que consulta dos
+// inmuebles, o un propietario que vuelve meses despues, quedaban fuera.
+//
+// Ahora:
+//   - Correo nuevo                          -> lead nuevo.
+//   - Correo repetido y otra publicacion    -> lead nuevo. Es otra oportunidad
+//     comercial y necesita su propia ficha en el pipeline.
+//   - Correo repetido, misma publicacion o
+//     consulta sin publicacion              -> interaccion sobre el lead que ya
+//     existe, mas IncrementarInteracciones. No se duplica la ficha.
+//
+// La respuesta marca EsContactoRepetido para que la web pueda decirlo sin
+// inventarse que creo algo nuevo.
+public class CreateLeadHandler : ICommandHandler<CreateLeadCommand, CreateLeadResponse>
+{
+    private static readonly TimeSpan ContinuationLifetime = TimeSpan.FromMinutes(20);
+    private const int MaxSourceLength = 100;
+    private const string UnknownChannel = "desconocido";
+    private const string UtmMarker = "|utm=";
+    private const int MaxChannelLength = 50;
+    private readonly ILeadRepository _leadRepo;
+    private readonly IAsesorRepository _asesorRepo;
+    private readonly ILeadDistributionSettingsRepository _distributionSettings;
+    private readonly IContactRepository _contactRepo;
+    private readonly ICustomerFunnelStageRepository _customerFunnelStages;
+    private readonly IPropertyPublicationRepository _publicationRepo;
+    private readonly IConsentimientoRepository _consentimientoRepo;
+    private readonly IPoliticaTratamientoRepository _politicaRepo;
+    private readonly IInteraccionRepository _interaccionRepo;
+    private readonly IEmailSender _emailSender;
+
+    public CreateLeadHandler(
+        ILeadRepository leadRepo,
+        IAsesorRepository asesorRepo,
+        ILeadDistributionSettingsRepository distributionSettings,
+        IContactRepository contactRepo,
+        ICustomerFunnelStageRepository customerFunnelStages,
+        IPropertyPublicationRepository publicationRepo,
+        IConsentimientoRepository consentimientoRepo,
+        IPoliticaTratamientoRepository politicaRepo,
+        IInteraccionRepository interaccionRepo,
+        IEmailSender emailSender)
+    {
+        _leadRepo = leadRepo;
+        _asesorRepo = asesorRepo;
+        _distributionSettings = distributionSettings;
+        _contactRepo = contactRepo;
+        _customerFunnelStages = customerFunnelStages;
+        _publicationRepo = publicationRepo;
+        _consentimientoRepo = consentimientoRepo;
+        _politicaRepo = politicaRepo;
+        _interaccionRepo = interaccionRepo;
+        _emailSender = emailSender;
+    }
+
+    public async Task<CreateLeadResponse> HandleAsync(CreateLeadCommand command, CancellationToken ct = default)
+    {
+        var email = Email.Create(command.Email);
+        var telefono = command.Telefono is not null ? Telefono.Create(command.Telefono) : null;
+        if (!command.AutorizacionDatos)
+            throw new DomainError("Se requiere autorizacion de tratamiento de datos (Ley 1581).");
+        var ownerService = ParseOwnerService(command.OwnerService);
+        var publicationId = ParsePublicationId(command.PublicationId);
+        var assignmentSource = LeadAssignmentSource.AutomaticLoadBalance;
+
+        PropertyPublication? publication = null;
+        var requiresPublicationReview = !string.IsNullOrWhiteSpace(command.PublicationId);
+
+        if (publicationId.HasValue)
+        {
+            publication = await _publicationRepo.GetPublishedByIdAsync(publicationId.Value);
+            requiresPublicationReview = publication is null;
+        }
+
+        // Criterio de duplicados por correo (ver comentario al final de la clase).
+        // Un correo repetido no es un error: es una persona que vuelve.
+        var opportunityKey = Lead.CreateOpportunityKey(email, publicationId);
+        var existing = await _leadRepo.GetByOpportunityKeyAsync(opportunityKey, ct);
+        if (existing is not null)
+            return await RegisterRepeatContactAsync(existing, command, publication, ct);
+
+        var source = BuildSource(
+            command.Fuente,
+            command.PublicationId,
+            requiresPublicationReview);
+        var lead = Lead.Crear(command.Nombre, email, telefono, source,
+            command.AutorizacionDatos, command.TipoOperacion, ownerService, publicationId,
+            sourceRoute: NormalizeSourceRoute(command.SourceRoute),
+            utmCampaign: NormalizeUtmCampaign(command.UtmCampaign));
+        var inboundStage = await _customerFunnelStages.GetDefaultForInboundAsync(ct);
+        var contact = await _contactRepo.CreateOrGetAsync(Contact.Create(command.Nombre, email, telefono,
+            inboundStage?.Name ?? "Nuevo", inboundStage?.FunnelName ?? "Clientes"), ct);
+        lead.LinkContact(contact.Id);
+
+        var continuation = OwnerInquiryContinuationToken.Issue();
+        lead.IssueOwnerInquiryContinuation(
+            continuation.Hash,
+            DateTime.UtcNow.Add(ContinuationLifetime));
+
+        if (publication is not null)
+            lead.AsignarAsesor(publication.AdvisorId);
+        else if (!requiresPublicationReview)
+        {
+            var rule = await _distributionSettings.GetRuleAsync(ct);
+            assignmentSource = rule == LeadDistributionRule.RoundRobin
+                ? LeadAssignmentSource.AutomaticRoundRobin
+                : LeadAssignmentSource.AutomaticLoadBalance;
+            var advisorId = rule == LeadDistributionRule.RoundRobin
+                ? await _asesorRepo.ObtenerSiguienteAsesorEnRotacionAsync(ct)
+                : await _asesorRepo.ObtenerAsesorConMenosOportunidadesAbiertasAsync(ct);
+            if (advisorId.HasValue)
+                lead.AsignarAsesor(advisorId.Value);
+        }
+
+        var creation = await _leadRepo.CreateOrGetExistingAsync(lead, ct, assignmentSource);
+        if (!creation.Created)
+            return await RegisterRepeatContactAsync(creation.Lead, command, publication, ct);
+
+        var saved = creation.Lead;
+
+        await RegisterConsentAsync(saved.Id, command);
+
+        await _emailSender.SendAsync(
+            command.Email,
+            "Recibimos tu solicitud en Enlyce Demo",
+            $"Hola {command.Nombre.Trim()}, gracias por escribirnos. Un asesor de Enlyce te contactará pronto.",
+            "Confirmación de solicitud web");
+        await NotifyAdvisorAsync(saved.AsesorAsignadoId, "Nueva oportunidad desde la web", command, publication);
+
+        return new CreateLeadResponse(
+            saved.Id, saved.Nombre, saved.Email.Value,
+            saved.Estado.ToString(), saved.FechaCreacion,
+            saved.OwnerService?.ToString(),
+            saved.PublicationId,
+            continuation.Token);
+    }
+
+    private async Task<CreateLeadResponse> RegisterRepeatContactAsync(
+        Lead existing,
+        CreateLeadCommand command,
+        PropertyPublication? publication,
+        CancellationToken ct)
+    {
+        var decoyContinuation = OwnerInquiryContinuationToken.Issue();
+        var advisorId = publication?.AdvisorId ?? existing.AsesorAsignadoId;
+
+        if (advisorId.HasValue)
+        {
+            var resumen = string.IsNullOrWhiteSpace(command.Fuente)
+                ? "Nuevo contacto desde la web."
+                : $"Nuevo contacto desde la web. Origen: {command.Fuente.Trim()}";
+
+            await _interaccionRepo.AgregarAsync(
+                Interaccion.Registrar(existing.Id, advisorId.Value, "ContactoWeb", resumen));
+        }
+
+        await NotifyAdvisorAsync(advisorId, "Un contacto volvió a escribir desde la web", command, publication);
+
+        // Sin asesor asignado no hay a quien atribuir la interaccion, pero el
+        // contador si debe moverse: es la senal de que la persona insiste.
+        existing.IncrementarInteracciones();
+        var saved = await _leadRepo.SaveAsync(existing);
+
+        await RegisterConsentAsync(saved.Id, command);
+
+        return new CreateLeadResponse(
+            saved.Id, saved.Nombre, saved.Email.Value,
+            saved.Estado.ToString(), saved.FechaCreacion,
+            saved.OwnerService?.ToString(),
+            saved.PublicationId,
+            decoyContinuation.Token,
+            EsContactoRepetido: true);
+    }
+
+    // El asesor se entera al instante; sin asesor asignado el lead queda en la
+    // bandeja de distribucion del CRM.
+    private async Task NotifyAdvisorAsync(
+        Guid? advisorId, string subject, CreateLeadCommand command, PropertyPublication? publication)
+    {
+        if (!advisorId.HasValue || await _asesorRepo.ObtenerPorIdAsync(advisorId.Value) is not { } advisor)
+            return;
+
+        var interest = publication is not null
+            ? $"Inmueble: {publication.PublicTitle}"
+            : $"Operación: {command.TipoOperacion}";
+        await _emailSender.SendAsync(
+            advisor.Correo.Value,
+            $"{subject}: {command.Nombre.Trim()}",
+            $"""
+            Nombre: {command.Nombre.Trim()}
+            Correo: {command.Email.Trim()}
+            Teléfono: {command.Telefono?.Trim() ?? "No informado"}
+            Origen: {command.Fuente?.Trim() ?? "Web"}
+            {interest}
+
+            Responde pronto: el primer contacto define la venta. Revisa la oportunidad en ENLYCE.
+            """,
+            "Aviso de nueva oportunidad al asesor");
+    }
+
+    private async Task RegisterConsentAsync(Guid leadId, CreateLeadCommand command)
+    {
+        if (!command.AutorizacionDatos)
+            return;
+
+        // Cada autorizacion se audita, tambien en el recontacto: la Ley 1581
+        // pide poder demostrar cuando y como se otorgo, no solo que existe.
+        var politica = await _politicaRepo.ObtenerActivaAsync();
+        if (politica is null)
+            return;
+
+        await _consentimientoRepo.AgregarAsync(Consentimiento.Registrar(
+            leadId,
+            politica.TextoCompleto,
+            politica.Version,
+            NormalizeChannel(command.Canal),
+            command.DireccionIp));
+    }
+
+    // El canal lo declara cada origen. No hay lista cerrada todavia: forzarla
+    // ahora romperia integraciones futuras sin aportar nada a la auditoria, que
+    // lo que necesita es saber que dijo el origen, no validarlo.
+    private static string NormalizeChannel(string? canal)
+    {
+        if (string.IsNullOrWhiteSpace(canal))
+            return UnknownChannel;
+
+        var trimmed = canal.Trim();
+        return trimmed[..Math.Min(trimmed.Length, MaxChannelLength)];
+    }
+
+    private static OwnerInquiryService? ParseOwnerService(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            return null;
+
+        if (!Enum.TryParse<OwnerInquiryService>(value, false, out var ownerService) ||
+            !Enum.IsDefined(ownerService))
+            throw new DomainError($"Servicio de propietario no valido: {value}");
+
+        return ownerService;
+    }
+
+    private static Guid? ParsePublicationId(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            return null;
+
+        return Guid.TryParse(value, out var publicationId) && publicationId != Guid.Empty
+            ? publicationId
+            : null;
+    }
+
+    private static string? NormalizeSourceRoute(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            return null;
+
+        var route = value.Trim();
+        return route.Length <= 500 && route.StartsWith("/", StringComparison.Ordinal) &&
+               !route.StartsWith("//", StringComparison.Ordinal) &&
+               !route.Contains("//", StringComparison.Ordinal) &&
+               !route.Contains('?') &&
+               !route.Contains('#') &&
+               !route.Any(char.IsControl)
+            ? route
+            : null;
+    }
+
+    private static string? NormalizeUtmCampaign(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            return null;
+
+        var campaign = value.Trim();
+        return campaign.Length <= 200 ? campaign : null;
+    }
+
+    private static string BuildSource(
+        string? source,
+        string? publicationReference,
+        bool requiresReview)
+    {
+        var baseSource = string.IsNullOrWhiteSpace(source) ? "Manual" : source.Trim();
+
+        if (!requiresReview)
+            return FitWithinLimit(baseSource, MaxSourceLength);
+
+        var reference = publicationReference?.Trim() ?? "missing";
+        var marker = $"PublicationReview:{reference}";
+        if (marker.Length >= MaxSourceLength)
+            return marker[..MaxSourceLength];
+
+        var availableBaseLength = MaxSourceLength - marker.Length - 1;
+        return $"{FitWithinLimit(baseSource, availableBaseLength)}|{marker}";
+    }
+
+    // La campana es el dato mas prescindible de la fuente: identificar el
+    // inmueble importa mas que saber de que anuncio vino. Por eso el segmento
+    // |utm= se recorta primero y se descarta entero antes de tocar el resto.
+    private static string FitWithinLimit(string source, int limit)
+    {
+        if (limit <= 0)
+            return string.Empty;
+
+        if (source.Length <= limit)
+            return source;
+
+        var utmIndex = source.IndexOf(UtmMarker, StringComparison.Ordinal);
+        if (utmIndex < 0)
+            return source[..limit];
+
+        var withoutUtm = source[..utmIndex];
+        if (withoutUtm.Length >= limit)
+            return withoutUtm[..limit];
+
+        // Si ni siquiera cabe el marcador completo, la campana se descarta
+        // entera: mejor sin dato que con un "|ut" que nadie sabe leer.
+        if (limit - withoutUtm.Length <= UtmMarker.Length)
+            return withoutUtm;
+
+        return source[..limit];
+    }
+}

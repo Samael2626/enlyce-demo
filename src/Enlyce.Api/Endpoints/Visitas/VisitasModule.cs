@@ -1,0 +1,192 @@
+using System.IdentityModel.Tokens.Jwt;
+using System.Security.Claims;
+using Enlyce.Application.Commands.Lead;
+using Enlyce.Domain.Ports;
+using Microsoft.AspNetCore.Mvc;
+
+namespace Enlyce.Api.Endpoints.Visitas;
+
+public static class VisitasModule
+{
+    public static void MapVisitas(this IEndpointRouteBuilder app)
+    {
+        var group = app.MapGroup("/api/visitas").WithTags("Visitas");
+
+        group.MapGet("/", async Task<IResult> (
+            HttpContext http,
+            IVisitaRepository repo) =>
+        {
+            if (http.User.IsInRole("Administrador"))
+                return Results.Ok(await repo.ObtenerVisitasAsync(null));
+
+            if (!http.User.IsInRole("Asesor"))
+                return Results.Forbid();
+
+            var advisorId = GetAdvisorId(http);
+            if (advisorId is null)
+                return Results.Forbid();
+
+            return Results.Ok(await repo.ObtenerVisitasAsync(advisorId));
+        })
+        .RequireAuthorization()
+        .WithName("ObtenerVisitas")
+        .Produces<List<Domain.Entities.Visita>>();
+
+        group.MapGet("/{id:guid}", async Task<IResult> (
+            Guid id,
+            HttpContext http,
+            IVisitaRepository visits,
+            ILeadRepository leads) =>
+        {
+            var visit = await visits.ObtenerPorIdAsync(id);
+            if (visit is null)
+                return Results.NotFound();
+            if (!await EndpointAccess.CanAccessLeadAsync(http.User, visit.LeadId, leads) ||
+                !EndpointAccess.CanActAsAdvisor(http.User, visit.AsesorId))
+                return Results.Forbid();
+            return Results.Ok(visit);
+        })
+        .RequireAuthorization()
+        .WithName("ObtenerVisita");
+
+        group.MapPost("/", async Task<IResult> (
+            [FromBody] RegistrarVisitaRequest request,
+            HttpContext http,
+            ILeadRepository leads,
+            RegistrarVisitaHandler handler) =>
+        {
+            if (!await EndpointAccess.CanAccessLeadAsync(http.User, request.LeadId, leads) ||
+                !EndpointAccess.CanActAsAdvisor(http.User, request.AsesorId))
+                return Results.Forbid();
+
+            var ok = await handler.HandleAsync(new RegistrarVisitaCommand(
+                request.LeadId, request.InmuebleId, request.AsesorId, request.FechaProgramada));
+            return ok ? Results.Ok() : Results.NotFound();
+        })
+        .RequireAuthorization()
+        .WithName("RegistrarVisita")
+        .ProducesProblem(StatusCodes.Status404NotFound);
+
+        group.MapGet("/lead/{leadId:guid}", async Task<IResult> (
+            Guid leadId,
+            HttpContext http,
+            IVisitaRepository repo,
+            ILeadRepository leadRepo) =>
+        {
+            if (!http.User.IsInRole("Administrador"))
+            {
+                var advisorId = GetAdvisorId(http);
+                if (!http.User.IsInRole("Asesor") || advisorId is null)
+                    return Results.Forbid();
+
+                var lead = await leadRepo.GetByIdAsync(leadId);
+                if (lead?.AsesorAsignadoId != advisorId)
+                    return Results.Forbid();
+
+                var ownVisits = await repo.ObtenerPorLeadAsync(leadId);
+                return Results.Ok(ownVisits.Where(visit => visit.AsesorId == advisorId).ToList());
+            }
+
+            var visitas = await repo.ObtenerPorLeadAsync(leadId);
+            return Results.Ok(visitas);
+        })
+        .RequireAuthorization()
+        .WithName("ObtenerVisitasPorLead")
+        .Produces<List<Domain.Entities.Visita>>();
+
+        group.MapPut("/{id:guid}/reprogramar", async Task<IResult> (
+            Guid id,
+            [FromBody] ReprogramarVisitaRequest request,
+            HttpContext http,
+            IVisitaRepository visits,
+            ILeadRepository leads) =>
+        {
+            var visit = await visits.ObtenerPorIdAsync(id);
+            if (visit is null)
+                return Results.NotFound();
+            if (!await CanManageVisitAsync(http, visit, leads))
+                return Results.Forbid();
+            visit.Reprogramar(request.FechaProgramada);
+            await visits.GuardarAsync(visit);
+            return Results.Ok(visit);
+        })
+        .RequireAuthorization()
+        .WithName("ReprogramarVisita");
+
+        group.MapPut("/{id:guid}/realizada", async Task<IResult> (
+            Guid id,
+            [FromBody] CompletarVisitaRequest request,
+            HttpContext http,
+            IVisitaRepository visits,
+            ILeadRepository leads) =>
+        {
+            var visit = await visits.ObtenerPorIdAsync(id);
+            if (visit is null)
+                return Results.NotFound();
+            if (!await CanManageVisitAsync(http, visit, leads))
+                return Results.Forbid();
+            visit.MarcarRealizada(request.Feedback);
+            await visits.GuardarAsync(visit);
+            return Results.Ok(visit);
+        })
+        .RequireAuthorization()
+        .WithName("CompletarVisita");
+
+        group.MapPut("/{id:guid}/cancelar", async Task<IResult> (
+            Guid id,
+            HttpContext http,
+            IVisitaRepository visits,
+            ILeadRepository leads) =>
+        {
+            var visit = await visits.ObtenerPorIdAsync(id);
+            if (visit is null)
+                return Results.NotFound();
+            if (!await CanManageVisitAsync(http, visit, leads))
+                return Results.Forbid();
+            visit.Cancelar();
+            await visits.GuardarAsync(visit);
+            return Results.Ok(visit);
+        })
+        .RequireAuthorization()
+        .WithName("CancelarVisita");
+
+        group.MapGet("/asesor/{asesorId:guid}", async Task<IResult> (
+            Guid asesorId,
+            [AsParameters] ConsultarVisitasAsesorRequest query,
+            HttpContext http,
+            IVisitaRepository repo) =>
+        {
+            if (!http.User.IsInRole("Administrador"))
+            {
+                var advisorId = GetAdvisorId(http);
+                if (!http.User.IsInRole("Asesor") || advisorId != asesorId)
+                    return Results.Forbid();
+            }
+
+            var visitas = await repo.ObtenerPorAsesorAsync(asesorId, query.Desde);
+            return Results.Ok(visitas);
+        })
+        .RequireAuthorization()
+        .WithName("ObtenerVisitasPorAsesor")
+        .Produces<List<Domain.Entities.Visita>>();
+    }
+
+    private static Guid? GetAdvisorId(HttpContext http)
+    {
+        var claim = http.User.FindFirst(ClaimTypes.NameIdentifier)?.Value
+            ?? http.User.FindFirst(JwtRegisteredClaimNames.Sub)?.Value;
+        return Guid.TryParse(claim, out var advisorId) ? advisorId : null;
+    }
+
+    private static async Task<bool> CanManageVisitAsync(
+        HttpContext http, Domain.Entities.Visita visit, ILeadRepository leads) =>
+        await EndpointAccess.CanAccessLeadAsync(http.User, visit.LeadId, leads) &&
+        EndpointAccess.CanActAsAdvisor(http.User, visit.AsesorId);
+}
+
+public record RegistrarVisitaRequest(
+    Guid LeadId, Guid InmuebleId, Guid AsesorId, DateTime FechaProgramada);
+
+public record ConsultarVisitasAsesorRequest(DateTime Desde);
+public record ReprogramarVisitaRequest(DateTime FechaProgramada);
+public record CompletarVisitaRequest(string? Feedback);

@@ -1,0 +1,134 @@
+using Enlyce.Domain.Entities;
+using Enlyce.Domain.ValueObjects;
+using Enlyce.Infrastructure.Persistence;
+using Microsoft.Data.Sqlite;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Infrastructure;
+
+namespace Enlyce.IntegrationTests;
+
+public sealed class PropertyPublicationPersistenceTests
+{
+    [Fact]
+    public async Task SaveCoordinates_CheckConstraintAllowsThreeDecimalsAndRejectsSix()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        connection.CreateFunction<string?, int>("char_length", value => value?.Length ?? 0);
+
+        var options = new DbContextOptionsBuilder<EnlyceDbContext>()
+            .UseSqlite(connection)
+            .ReplaceService<IModelCustomizer, SqliteTestModelCustomizer>()
+            .Options;
+
+        await using var db = new EnlyceDbContext(options);
+        await db.Database.EnsureCreatedAsync();
+
+        var owner = Propietario.Crear("Dueño de prueba", Email.Create("coordinates@example.test"));
+        var advisor = Asesor.Crear(
+            "Asesor de prueba",
+            Email.Create("coordinates-advisor@example.test"),
+            "test-hash");
+        var property = Inmueble.Crear(
+            "Apartamento de prueba",
+            "Descripción de prueba",
+            TipoInmueble.Apartamento,
+            ModalidadInmueble.Venta,
+            Direccion.Crear("Calle privada", "Medellín", "Laureles"),
+            Dinero.Crear(100_000_000m),
+            50,
+            2,
+            1,
+            1,
+            owner.Id);
+        var publication = PropertyPublication.Create(
+            property.Id,
+            advisor.Id,
+            "apartamento-coordenadas-prueba",
+            "Apartamento de prueba",
+            "Descripción pública de prueba");
+        publication.SetPublicPrice(100_000_000m);
+        publication.SetPublicLocation("Medellín", "Laureles", 6.244m, -75.593m);
+
+        db.Propietarios.Add(owner);
+        db.Asesores.Add(advisor);
+        db.Inmuebles.Add(property);
+        db.PropertyPublications.Add(publication);
+        await db.SaveChangesAsync();
+
+        var accepted = await db.Database.ExecuteSqlInterpolatedAsync(
+            $"UPDATE \"PropertyPublications\" SET \"ApproximateLatitude\" = 6.244, \"ApproximateLongitude\" = -75.593 WHERE \"Id\" = {publication.Id}");
+        Assert.Equal(1, accepted);
+
+        await db.Database.ExecuteSqlInterpolatedAsync(
+            $"UPDATE \"PropertyPublications\" SET \"ApproximateLatitude\" = NULL, \"ApproximateLongitude\" = NULL WHERE \"Id\" = {publication.Id}");
+
+        await Assert.ThrowsAsync<SqliteException>(() =>
+            db.Database.ExecuteSqlInterpolatedAsync(
+                $"UPDATE \"PropertyPublications\" SET \"ApproximateLatitude\" = 6.244321 WHERE \"Id\" = {publication.Id}"));
+        await Assert.ThrowsAsync<SqliteException>(() =>
+            db.Database.ExecuteSqlInterpolatedAsync(
+                $"UPDATE \"PropertyPublications\" SET \"ApproximateLongitude\" = -75.593321 WHERE \"Id\" = {publication.Id}"));
+    }
+
+    [Fact]
+    public async Task SaveAndLoad_PublishedAggregate_RehydratesPhotosAndState()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        connection.CreateFunction<string?, int>("char_length", value => value?.Length ?? 0);
+
+        var options = new DbContextOptionsBuilder<EnlyceDbContext>()
+            .UseSqlite(connection)
+            .ReplaceService<IModelCustomizer, SqliteTestModelCustomizer>()
+            .Options;
+
+        await using var db = new EnlyceDbContext(options);
+        await db.Database.EnsureCreatedAsync();
+
+        var advisor = Asesor.Crear(
+            "Asesor Web",
+            Email.Create("web@example.test"),
+            "hash-for-persistence-test");
+        var property = Inmueble.Crear(
+            "Apartamento Laureles",
+            "Inmueble de prueba",
+            TipoInmueble.Apartamento,
+            ModalidadInmueble.Venta,
+            Direccion.Crear("Dirección privada", "Medellín", "Laureles"),
+            Dinero.Crear(620_000_000m),
+            92,
+            3,
+            2,
+            1,
+            Guid.NewGuid());
+        var publication = PropertyPublication.Create(
+            property.Id,
+            advisor.Id,
+            "Apartamento en Laureles",
+            "Apartamento iluminado",
+            "Cerca de servicios y vías principales.");
+        publication.SetPublicPrice(620_000_000m);
+        publication.SetPublicLocation("Medellín", "Laureles", 6.2443m, -75.5934m);
+        publication.AddPhoto("https://media.example.test/1.webp", "Sala", 0, true);
+        publication.AddPhoto("https://media.example.test/2.webp", "Cocina", 1);
+        publication.AddPhoto("https://media.example.test/3.webp", "Habitación", 2);
+        publication.Publish();
+
+        db.Asesores.Add(advisor);
+        db.Inmuebles.Add(property);
+        db.PropertyPublications.Add(publication);
+        await db.SaveChangesAsync();
+        db.ChangeTracker.Clear();
+
+        var restored = await db.PropertyPublications
+            .Include(item => item.Photos)
+            .SingleAsync(item => item.Id == publication.Id);
+
+        Assert.Equal(PublicationStatus.Published, restored.Status);
+        Assert.Equal("apartamento-en-laureles", restored.Slug);
+        Assert.Equal(3, restored.Photos.Count);
+        Assert.Single(restored.Photos, photo => photo.IsCover);
+        Assert.False(restored.ExactAddressVisible);
+    }
+}

@@ -1,0 +1,246 @@
+using System.Net;
+using System.Net.Http.Json;
+using Enlyce.Domain.Entities;
+using Enlyce.Domain.ValueObjects;
+using Enlyce.Infrastructure.Persistence;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
+
+namespace Enlyce.IntegrationTests;
+
+// Cruce inverso inmueble -> demandas: misma regla que demanda -> inmuebles
+public sealed class PropertyDemandMatchTests(TestWebApplicationFactory factory)
+    : IClassFixture<TestWebApplicationFactory>
+{
+    [Fact]
+    public async Task ReturnsOnlyCompatibleActiveDemandsConsistentWithForwardMatch()
+    {
+        var (client, advisor) = factory.CreateAuthenticatedClient("Asesor");
+        using (client)
+        {
+            var city = $"Ciudad-{Guid.NewGuid():N}";
+            var property = CreateProperty(city, 400_000_000);
+            var (contact, lead) = SeedContact(advisor.Id);
+            var matching = Demand(contact.Id, lead.Id, city, 300_000_000, 500_000_000);
+            var tooCheap = Demand(contact.Id, lead.Id, city, null, 200_000_000);
+            var otherCity = Demand(contact.Id, lead.Id, "Otra", null, null);
+            var inactive = Demand(contact.Id, lead.Id, city, null, null);
+            inactive.Deactivate();
+            Seed(property, matching, tooCheap, otherCity, inactive);
+
+            var reverse = await client.GetFromJsonAsync<MatchDto[]>($"/api/inmuebles/{property.Id}/demandas");
+            Assert.NotNull(reverse);
+            var only = Assert.Single(reverse);
+            Assert.Equal(matching.Id, only.Demand.Id);
+            Assert.Equal(contact.Name, only.ContactName);
+            Assert.Null(only.RelationshipStatus);
+
+            foreach (var demand in new[] { matching, tooCheap, otherCity })
+            {
+                var forward = await client.GetFromJsonAsync<ForwardDto[]>($"/api/demandas/{demand.Id}/coincidencias");
+                Assert.NotNull(forward);
+                Assert.Equal(demand == matching, forward.Any(item => item.PropertyId == property.Id));
+            }
+        }
+    }
+
+    [Fact]
+    public async Task ReturnsEmptyForUnavailablePropertyAndNotFoundForMissing()
+    {
+        var (client, advisor) = factory.CreateAuthenticatedClient("Asesor");
+        using (client)
+        {
+            var city = $"Ciudad-{Guid.NewGuid():N}";
+            var property = CreateProperty(city, 400_000_000);
+            property.MarcarVendido();
+            var (contact, lead) = SeedContact(advisor.Id);
+            Seed(property, Demand(contact.Id, lead.Id, city, null, null));
+
+            var sold = await client.GetFromJsonAsync<MatchDto[]>($"/api/inmuebles/{property.Id}/demandas");
+            Assert.NotNull(sold);
+            Assert.Empty(sold);
+
+            var missing = await client.GetAsync($"/api/inmuebles/{Guid.NewGuid()}/demandas");
+            Assert.Equal(HttpStatusCode.NotFound, missing.StatusCode);
+        }
+    }
+
+    [Fact]
+    public async Task AdvisorsOnlySeeTheirOwnDemandsAndAdminSeesAll()
+    {
+        var (clientA, advisorA) = factory.CreateAuthenticatedClient("Asesor");
+        var (clientB, advisorB) = factory.CreateAuthenticatedClient("Asesor");
+        var (admin, _) = factory.CreateAuthenticatedClient("Administrador");
+        using (clientA)
+        using (clientB)
+        using (admin)
+        {
+            var city = $"Ciudad-{Guid.NewGuid():N}";
+            var property = CreateProperty(city, 400_000_000);
+            var (contactA, leadA) = SeedContact(advisorA.Id);
+            var (contactB, leadB) = SeedContact(advisorB.Id);
+            var demandA = Demand(contactA.Id, leadA.Id, city, null, null);
+            var demandB = Demand(contactB.Id, leadB.Id, city, null, null);
+            Seed(property, demandA, demandB);
+
+            var url = $"/api/inmuebles/{property.Id}/demandas";
+            var seenA = await clientA.GetFromJsonAsync<MatchDto[]>(url);
+            var seenB = await clientB.GetFromJsonAsync<MatchDto[]>(url);
+            var seenAdmin = await admin.GetFromJsonAsync<MatchDto[]>(url);
+
+            Assert.Equal([demandA.Id], seenA!.Select(item => item.Demand.Id));
+            Assert.Equal([demandB.Id], seenB!.Select(item => item.Demand.Id));
+            Assert.Equal(new[] { demandA.Id, demandB.Id }.Order(), seenAdmin!.Select(item => item.Demand.Id).Order());
+
+            var foreignLink = await clientB.PostAsync($"/api/demandas/{demandA.Id}/inmuebles/{property.Id}", null);
+            Assert.Equal(HttpStatusCode.Forbidden, foreignLink.StatusCode);
+        }
+    }
+
+    [Fact]
+    public async Task ListCountsMatchDetailAndRespectAdvisorScope()
+    {
+        var (clientA, advisorA) = factory.CreateAuthenticatedClient("Asesor");
+        var (clientB, advisorB) = factory.CreateAuthenticatedClient("Asesor");
+        using (clientA)
+        using (clientB)
+        {
+            var city = $"Ciudad-{Guid.NewGuid():N}";
+            var property = CreateProperty(city, 400_000_000);
+            var unmatched = CreateProperty($"Vacia-{Guid.NewGuid():N}", 400_000_000);
+            var (contactA, leadA) = SeedContact(advisorA.Id);
+            var (contactB, leadB) = SeedContact(advisorB.Id);
+            Seed(property, Demand(contactA.Id, leadA.Id, city, null, null),
+                Demand(contactA.Id, leadA.Id, city, 300_000_000, null),
+                Demand(contactB.Id, leadB.Id, city, null, null));
+            Seed(unmatched);
+
+            var url = $"/api/inmuebles/clientes-posibles?ids={property.Id}&ids={unmatched.Id}&ids={Guid.NewGuid()}";
+            var countsA = await clientA.GetFromJsonAsync<Dictionary<Guid, int>>(url);
+            var countsB = await clientB.GetFromJsonAsync<Dictionary<Guid, int>>(url);
+            var detailA = await clientA.GetFromJsonAsync<MatchDto[]>($"/api/inmuebles/{property.Id}/demandas");
+
+            Assert.Equal(2, countsA![property.Id]);
+            Assert.Equal(detailA!.Length, countsA[property.Id]);
+            Assert.Equal(0, countsA[unmatched.Id]);
+            Assert.Equal(2, countsA.Count);
+            Assert.Equal(1, countsB![property.Id]);
+        }
+    }
+
+    [Fact]
+    public async Task AdvisorCannotSeeOrLinkAnotherAdvisorsProperty()
+    {
+        var (clientA, advisorA) = factory.CreateAuthenticatedClient("Asesor");
+        var (clientB, advisorB) = factory.CreateAuthenticatedClient("Asesor");
+        var (admin, _) = factory.CreateAuthenticatedClient("Administrador");
+        using (clientA)
+        using (clientB)
+        using (admin)
+        {
+            var city = $"Ciudad-{Guid.NewGuid():N}";
+            var owned = CreateProperty(city, 400_000_000);
+            owned.AsignarAsesorResponsable(advisorA.Id);
+            var foreign = CreateProperty(city, 400_000_000);
+            foreign.AsignarAsesorResponsable(advisorB.Id);
+            var (contact, lead) = SeedContact(advisorA.Id);
+            var demand = Demand(contact.Id, lead.Id, city, null, null);
+            Seed(owned, demand);
+            Seed(foreign);
+
+            var forward = await clientA.GetFromJsonAsync<ForwardDto[]>($"/api/demandas/{demand.Id}/coincidencias");
+            Assert.Equal([owned.Id], forward!.Select(item => item.PropertyId));
+
+            var cross = await clientA.GetFromJsonAsync<CrossPageDto>("/api/demandas/cruce?pageSize=100");
+            Assert.Equal(1, Assert.Single(cross!.Items, item => item.Demand.Id == demand.Id).OwnPropertyMatches);
+
+            var counts = await clientA.GetFromJsonAsync<Dictionary<Guid, int>>(
+                $"/api/inmuebles/clientes-posibles?ids={owned.Id}&ids={foreign.Id}");
+            Assert.Equal(1, counts![owned.Id]);
+            Assert.False(counts.ContainsKey(foreign.Id));
+
+            var reverse = await clientA.GetAsync($"/api/inmuebles/{foreign.Id}/demandas");
+            Assert.Equal(HttpStatusCode.NotFound, reverse.StatusCode);
+            var linked = await clientA.PostAsync($"/api/demandas/{demand.Id}/inmuebles/{foreign.Id}", null);
+            Assert.Equal(HttpStatusCode.NotFound, linked.StatusCode);
+
+            var adminLink = await admin.PostAsync($"/api/demandas/{demand.Id}/inmuebles/{foreign.Id}", null);
+            Assert.Equal(HttpStatusCode.Created, adminLink.StatusCode);
+            var foreignStatus = await clientA.PutAsJsonAsync(
+                $"/api/demandas/{demand.Id}/inmuebles/{foreign.Id}/estado", new { status = "Shared" });
+            Assert.Equal(HttpStatusCode.NotFound, foreignStatus.StatusCode);
+
+            var adminForward = await admin.GetFromJsonAsync<ForwardDto[]>($"/api/demandas/{demand.Id}/coincidencias");
+            Assert.Equal(new[] { owned.Id, foreign.Id }.Order(), adminForward!.Select(item => item.PropertyId).Order());
+        }
+    }
+
+    [Fact]
+    public async Task FollowUpFromPropertySideIsPersistedAndVisibleInBothDirections()
+    {
+        var (client, advisor) = factory.CreateAuthenticatedClient("Asesor");
+        using (client)
+        {
+            var city = $"Ciudad-{Guid.NewGuid():N}";
+            var property = CreateProperty(city, 400_000_000);
+            var (contact, lead) = SeedContact(advisor.Id);
+            var demand = Demand(contact.Id, lead.Id, city, null, null);
+            Seed(property, demand);
+
+            var linked = await client.PostAsync($"/api/demandas/{demand.Id}/inmuebles/{property.Id}", null);
+            Assert.Equal(HttpStatusCode.Created, linked.StatusCode);
+            var status = await client.PutAsJsonAsync(
+                $"/api/demandas/{demand.Id}/inmuebles/{property.Id}/estado", new { status = "Shared" });
+            Assert.Equal(HttpStatusCode.OK, status.StatusCode);
+
+            var reverse = await client.GetFromJsonAsync<MatchDto[]>($"/api/inmuebles/{property.Id}/demandas");
+            var forward = await client.GetFromJsonAsync<ForwardDto[]>($"/api/demandas/{demand.Id}/coincidencias");
+            Assert.Equal("Shared", Assert.Single(reverse!).RelationshipStatus);
+            Assert.Equal("Shared", Assert.Single(forward!, item => item.PropertyId == property.Id).RelationshipStatus);
+
+            using var scope = factory.Services.CreateScope();
+            var stored = await scope.ServiceProvider.GetRequiredService<EnlyceDbContext>()
+                .DemandPropertyLinks.SingleAsync(item => item.DemandId == demand.Id && item.PropertyId == property.Id);
+            Assert.Equal(DemandPropertyStatus.Shared, stored.Status);
+        }
+    }
+
+    private static Inmueble CreateProperty(string city, decimal price) =>
+        Inmueble.Crear("Apartamento cruce", "", TipoInmueble.Apartamento, ModalidadInmueble.Venta,
+            Direccion.Crear("Calle 1", city, "Centro"), Dinero.Crear(price), 80, 2, 2, 1,
+            TestWebApplicationFactory.PropietarioSeedId);
+
+    private static CustomerDemand Demand(Guid contactId, Guid leadId, string city, decimal? min, decimal? max) =>
+        CustomerDemand.Create(contactId, leadId, ModalidadInmueble.Venta, TipoInmueble.Apartamento,
+            city, null, min, max, 2, null, null, null);
+
+    private void Seed(Inmueble property, params CustomerDemand[] demands)
+    {
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<EnlyceDbContext>();
+        db.Inmuebles.Add(property);
+        db.CustomerDemands.AddRange(demands);
+        db.SaveChanges();
+    }
+
+    private (Contact Contact, Lead Lead) SeedContact(Guid advisorId)
+    {
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<EnlyceDbContext>();
+        var email = Email.Create($"cruce-{Guid.NewGuid():N}@test.com");
+        var contact = Contact.Create("Contacto cruce", email, Telefono.Create("3101234567"));
+        var lead = Lead.Crear(contact.Name, email, Telefono.Create("3101234567"), "Test", true,
+            contactId: contact.Id);
+        lead.AsignarAsesor(advisorId);
+        db.Contacts.Add(contact);
+        db.Leads.Add(lead);
+        db.SaveChanges();
+        return (contact, lead);
+    }
+
+    private sealed record DemandDto(Guid Id);
+    private sealed record MatchDto(DemandDto Demand, string ContactName, string? RelationshipStatus);
+    private sealed record ForwardDto(Guid PropertyId, string? RelationshipStatus);
+    private sealed record CrossPageDto(CrossItemDto[] Items);
+    private sealed record CrossItemDto(DemandDto Demand, int OwnPropertyMatches);
+}

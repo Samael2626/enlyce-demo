@@ -1,0 +1,408 @@
+using Enlyce.Api.Endpoints.Imports;
+using Enlyce.Api.Endpoints.Alerts;
+using Enlyce.Application.Abstractions;
+using System.Net;
+using System.Text;
+using System.Threading.RateLimiting;
+using Enlyce.Api.Endpoints.Billing;
+using Enlyce.Api.Endpoints.Analytics;
+using Enlyce.Api.Development;
+using Enlyce.Api.Endpoints.Alertas;
+using Enlyce.Api.Endpoints.Advisors;
+using Enlyce.Api.Endpoints.Auth;
+using Enlyce.Api.Endpoints.Contacts;
+using Enlyce.Api.Endpoints.CustomerCatalogs;
+using Enlyce.Api.Endpoints.CustomerFunnels;
+using Enlyce.Api.Endpoints.CsvExport;
+using Enlyce.Api.Endpoints.Demands;
+using Enlyce.Api.Endpoints.Tasks;
+using Enlyce.Api.Endpoints.DatosPersonales;
+using Enlyce.Api.Endpoints.Health;
+using Enlyce.Api.Endpoints.Inmuebles;
+using Enlyce.Api.Endpoints.Interacciones;
+using Enlyce.Api.Endpoints.Leads;
+using Enlyce.Api.Endpoints.LeadDistribution;
+using Enlyce.Api.Endpoints.LeadSla;
+using Enlyce.Api.Endpoints.Pipeline;
+using Enlyce.Api.Endpoints.Politica;
+using Enlyce.Api.Endpoints.PublicationMedia;
+using Enlyce.Api.Endpoints.Media;
+using Enlyce.Api.Endpoints.Publications;
+using Enlyce.Api.Endpoints.PublicCatalog;
+using Enlyce.Api.Endpoints.RealizedDeals;
+using Enlyce.Api.Endpoints.Chat;
+using Enlyce.Api.Endpoints.WebsiteConfig;
+using Enlyce.Api.Hubs;
+using Enlyce.Api.Endpoints.Visitas;
+using Enlyce.Api.Middleware;
+using Enlyce.Api.Security;
+using Enlyce.Application;
+using Enlyce.Application.Auth;
+using Enlyce.Domain.Entities;
+using Enlyce.Domain.Ports;
+using Enlyce.Domain.ValueObjects;
+using Enlyce.Infrastructure;
+using Enlyce.Infrastructure.Auth;
+using Microsoft.AspNetCore.Cors.Infrastructure;
+using Enlyce.Infrastructure.Persistence;
+using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.AspNetCore.HttpOverrides;
+using Microsoft.AspNetCore.RateLimiting;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.FileProviders;
+using Microsoft.Extensions.Options;
+using Microsoft.IdentityModel.Tokens;
+
+var builder = WebApplication.CreateBuilder(args);
+
+builder.WebHost.ConfigureKestrel(options =>
+{
+    options.AddServerHeader = false;
+    options.Limits.MaxRequestBodySize = 12 * 1024 * 1024;
+});
+
+if (int.TryParse(Environment.GetEnvironmentVariable("PORT"), out var railwayPort) && railwayPort is > 0 and <= 65535)
+    builder.WebHost.UseUrls($"http://0.0.0.0:{railwayPort}");
+
+builder.Services.Configure<JwtSettings>(builder.Configuration.GetSection("JwtSettings"));
+
+builder.Services.AddAuthentication(options =>
+{
+    options.DefaultAuthenticateScheme = JwtBearerDefaults.AuthenticationScheme;
+    options.DefaultChallengeScheme = JwtBearerDefaults.AuthenticationScheme;
+})
+.AddJwtBearer(options =>
+{
+    options.RequireHttpsMetadata = !builder.Environment.IsDevelopment();
+    options.SaveToken = false;
+    options.Events = new JwtBearerEvents
+    {
+        OnMessageReceived = context =>
+        {
+            var accessToken = context.Request.Query["access_token"];
+            var path = context.HttpContext.Request.Path;
+            if (!string.IsNullOrEmpty(accessToken) && path.StartsWithSegments("/hubs"))
+            {
+                context.Token = accessToken;
+            }
+            return Task.CompletedTask;
+        },
+        OnTokenValidated = async context =>
+        {
+            var subject = context.Principal?.FindFirst(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Sub)?.Value
+                ?? context.Principal?.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value;
+            var version = context.Principal?.FindFirst("session_version")?.Value;
+            if (!Guid.TryParse(subject, out var asesorId) || !int.TryParse(version, out var sessionVersion))
+            {
+                context.Fail("Sesion invalida.");
+                return;
+            }
+
+            var db = context.HttpContext.RequestServices.GetRequiredService<EnlyceDbContext>();
+            var valid = await db.Asesores.AsNoTracking().AnyAsync(asesor =>
+                asesor.Id == asesorId && asesor.Activo && asesor.SessionVersion == sessionVersion);
+            if (!valid)
+                context.Fail("Sesion revocada.");
+        }
+    };
+});
+builder.Services.AddSingleton<IConfigureOptions<JwtBearerOptions>>(sp =>
+{
+    var settings = sp.GetRequiredService<IOptions<JwtSettings>>().Value;
+    return new ConfigureNamedOptions<JwtBearerOptions>(JwtBearerDefaults.AuthenticationScheme, options =>
+    {
+        options.TokenValidationParameters = new TokenValidationParameters
+        {
+            ValidateIssuerSigningKey = true,
+            IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(settings.SecretKey)),
+            ValidateIssuer = true,
+            ValidIssuer = settings.Issuer,
+            ValidateAudience = true,
+            ValidAudience = settings.Audience,
+            ValidateLifetime = true,
+            ClockSkew = TimeSpan.Zero
+        };
+    });
+});
+
+builder.Services.AddSignalR();
+builder.Services.AddSingleton<Microsoft.AspNetCore.SignalR.IUserIdProvider, CustomUserIdProvider>();
+
+builder.Services.AddAuthorizationBuilder()
+    .AddPolicy("Administrador", policy => policy.RequireRole("Administrador"))
+    .AddPolicy("Asesor", policy => policy.RequireRole("Asesor"));
+
+builder.Services.AddApplication();
+builder.Services.AddInfrastructure(builder.Configuration);
+builder.Services.Configure<PublicSiteOptions>(builder.Configuration.GetSection(PublicSiteOptions.SectionName));
+builder.Services.AddSingleton<IPublicLinks, PublicLinks>();
+builder.Services.AddEndpointsApiExplorer();
+builder.Services.AddSwaggerGen();
+builder.Services.AddSingleton<LoginAttemptGuard>();
+builder.Services.AddSingleton<MediaCleanupJobRunner>();
+builder.Services.AddHsts(options =>
+{
+    options.MaxAge = TimeSpan.FromDays(180);
+    options.IncludeSubDomains = true;
+});
+builder.Services.AddRateLimiter(options =>
+{
+    options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+    options.OnRejected = (context, _) =>
+    {
+        if (context.Lease.TryGetMetadata(MetadataName.RetryAfter, out var retryAfter))
+            context.HttpContext.Response.Headers.RetryAfter = Math.Ceiling(retryAfter.TotalSeconds).ToString();
+
+        return ValueTask.CompletedTask;
+    };
+    options.AddPolicy("auth-login", context => CreateIpLimiter(context, 10));
+    options.AddPolicy("public-leads", context => CreateIpLimiter(context, 40));
+    options.AddPolicy("public-analytics", context => CreateIpLimiter(context, 120));
+    options.AddPolicy("owner-details", context => CreateIpLimiter(context, 20));
+    options.AddPolicy("client-export-email", context => CreateIpLimiter(context, 2));
+    options.AddPolicy("wompi-webhook", context => CreateIpLimiter(context, 120));
+    options.AddPolicy("billing-checkout", context =>
+        RateLimitPartition.GetFixedWindowLimiter(
+            context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+            _ => new FixedWindowRateLimiterOptions
+            {
+                PermitLimit = 8,
+                Window = TimeSpan.FromMinutes(1),
+                QueueLimit = 0
+            }));
+    options.AddPolicy("billing-status", context =>
+        RateLimitPartition.GetFixedWindowLimiter(
+            context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+            _ => new FixedWindowRateLimiterOptions
+            {
+                PermitLimit = 30,
+                Window = TimeSpan.FromMinutes(1),
+                QueueLimit = 0
+            }));
+});
+
+var localCorsOrigins = new[]
+{
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:4173",
+    "http://localhost:3000",
+    "http://127.0.0.1:3000"
+};
+builder.Services.AddCors();
+builder.Services.AddOptions<CorsOptions>()
+    .Configure<IConfiguration>((options, configuration) =>
+    {
+        var configuredCorsOrigins = configuration
+            .GetSection("Cors:AllowedOrigins")
+            .Get<string[]>() ?? [];
+        var corsOrigins = localCorsOrigins
+            .Concat(configuredCorsOrigins)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+        options.AddDefaultPolicy(policy =>
+        {
+            // Origenes explicitos: AllowAnyOrigin es incompatible con AllowCredentials
+            policy.WithOrigins(corsOrigins)
+                  .AllowAnyMethod()
+                  .AllowAnyHeader()
+                  .AllowCredentials();
+
+            if (configuration.GetValue<bool>("Cors:AllowTrycloudflareOrigins"))
+            {
+                policy.SetIsOriginAllowed(origin =>
+                {
+                    if (corsOrigins.Contains(origin, StringComparer.OrdinalIgnoreCase))
+                        return true;
+
+                    if (!Uri.TryCreate(origin, UriKind.Absolute, out var uri) ||
+                        uri.Scheme != Uri.UriSchemeHttps ||
+                        !uri.IsDefaultPort ||
+                        uri.UserInfo.Length != 0 ||
+                        uri.AbsolutePath != "/" ||
+                        uri.Query.Length != 0 ||
+                        uri.Fragment.Length != 0)
+                        return false;
+
+                    const string suffix = ".trycloudflare.com";
+                    if (!uri.Host.EndsWith(suffix, StringComparison.OrdinalIgnoreCase))
+                        return false;
+
+                    var subdomain = uri.Host[..^suffix.Length];
+                    return subdomain.Length > 0 && !subdomain.Contains('.');
+                });
+            }
+        });
+    });
+
+// Solo se confia en X-Forwarded-For cuando hay un proxy declarado delante (el
+// tunel de Cloudflare del demo). Sin esa configuracion el header se ignora: de
+// lo contrario cualquiera podria falsear su IP en la auditoria de consentimiento.
+var trustedProxies = builder.Configuration
+    .GetSection("Forwarding:KnownProxies").Get<string[]>() ?? [];
+var trustForwardedHeaders = builder.Configuration.GetValue<bool>("Forwarding:Enabled");
+
+if (trustForwardedHeaders)
+{
+    builder.Services.Configure<ForwardedHeadersOptions>(options =>
+    {
+        options.ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto;
+        options.ForwardLimit = 1;
+        options.KnownProxies.Clear();
+        options.KnownIPNetworks.Clear();
+
+        foreach (var proxy in trustedProxies)
+            if (IPAddress.TryParse(proxy, out var parsed))
+                options.KnownProxies.Add(parsed);
+    });
+}
+
+var app = builder.Build();
+
+if (trustForwardedHeaders)
+    app.UseForwardedHeaders();
+
+if (!app.Environment.IsDevelopment())
+{
+    app.UseHsts();
+    app.UseHttpsRedirection();
+}
+
+var signingKey = app.Services.GetRequiredService<IOptions<JwtSettings>>().Value.SecretKey;
+if (string.IsNullOrWhiteSpace(signingKey) || Encoding.UTF8.GetByteCount(signingKey) < 32)
+    throw new InvalidOperationException("Configura JwtSettings:SecretKey fuera del repositorio (minimo 32 bytes).");
+
+var seedPublicCatalog = app.Environment.IsDevelopment() &&
+    app.Configuration.GetValue<bool>("DemoData:SeedPublicCatalog");
+var bootstrapAdministrator = app.Configuration.GetValue<bool>("Auth:BootstrapAdmin:Enabled");
+if (seedPublicCatalog || bootstrapAdministrator || app.Configuration.GetValue<bool>("Database:ApplyMigrations"))
+{
+    await using var scope = app.Services.CreateAsyncScope();
+    var db = scope.ServiceProvider.GetRequiredService<EnlyceDbContext>();
+    await db.Database.MigrateAsync();
+
+    if (bootstrapAdministrator && !await db.Asesores.AnyAsync())
+    {
+        var email = app.Configuration["Auth:BootstrapAdmin:Email"];
+        var password = app.Configuration["Auth:BootstrapAdmin:Password"];
+        if (string.IsNullOrWhiteSpace(email) || string.IsNullOrWhiteSpace(password) || password.Length < 16)
+            throw new InvalidOperationException("Configura el correo y una contrasena de bootstrap de al menos 16 caracteres.");
+
+        db.Asesores.Add(Asesor.Crear(
+            "Administrador",
+            Email.Create(email),
+            BCrypt.Net.BCrypt.HashPassword(password),
+            "Administrador"));
+        await db.SaveChangesAsync();
+    }
+
+    // Reset de contrasena de administracion controlado por entorno (operacion puntual).
+    // Desactivado por defecto; se habilita con Auth:ResetAdmin:Enabled y se revierte tras usarlo.
+    if (app.Configuration.GetValue<bool>("Auth:ResetAdmin:Enabled"))
+    {
+        var resetEmail = app.Configuration["Auth:ResetAdmin:Email"];
+        var resetPassword = app.Configuration["Auth:ResetAdmin:Password"];
+        if (string.IsNullOrWhiteSpace(resetEmail) || string.IsNullOrWhiteSpace(resetPassword) || resetPassword.Length < 8)
+            throw new InvalidOperationException("Configura el correo y una contrasena de reset de al menos 8 caracteres.");
+
+        var asesor = await db.Asesores.SingleOrDefaultAsync(a => a.Correo.Value == resetEmail);
+        if (asesor is not null)
+        {
+            asesor.CambiarPasswordHash(BCrypt.Net.BCrypt.HashPassword(resetPassword));
+            await db.SaveChangesAsync();
+        }
+    }
+
+    if (seedPublicCatalog)
+    {
+        var mediaStorage = scope.ServiceProvider.GetRequiredService<IMediaStorage>();
+        var photoSource = app.Configuration.GetValue<string>("DemoData:PhotoSourceDirectory")
+            ?? Path.Combine(app.Environment.ContentRootPath, "..", "..", "website", "assets");
+        await DemoCatalogSeeder.SeedAsync(db, mediaStorage, Path.GetFullPath(photoSource));
+    }
+}
+
+app.UseMiddleware<ExceptionHandlerMiddleware>();
+app.UseMiddleware<SecurityHeadersMiddleware>();
+
+// Sirve las variantes generadas por LocalMediaStorage bajo /media.
+var mediaRoot = Path.Combine(app.Environment.ContentRootPath, "wwwroot", "media");
+Directory.CreateDirectory(mediaRoot);
+app.UseStaticFiles(new StaticFileOptions
+{
+    FileProvider = new PhysicalFileProvider(mediaRoot),
+    RequestPath = "/media"
+});
+app.UseStaticFiles();
+
+app.UseCors();
+app.UseRateLimiter();
+app.UseMiddleware<CookieAuthenticationMiddleware>();
+
+if (app.Environment.IsDevelopment())
+{
+    app.UseSwagger();
+    app.UseSwaggerUI();
+}
+
+app.UseAuthentication();
+app.UseAuthorization();
+
+app.MapHealth();
+app.MapLeads();
+app.MapCsvExport();
+app.MapLeadDistribution();
+app.MapLeadSla();
+app.MapContacts();
+app.MapCustomerCatalogs();
+app.MapCustomerFunnels();
+app.MapTasks();
+app.MapDemands();
+app.MapInmuebles();
+app.MapMediaCleanup();
+app.MapClientImport();
+app.MapAuth();
+app.MapPolitica();
+app.MapDatosPersonales();
+app.MapPipeline();
+app.MapLeadHistory();
+app.MapAdvisors();
+app.MapInteracciones();
+app.MapVisitas();
+app.MapAlertas();
+app.MapPublicCatalog();
+app.MapSearchAlerts();
+if (!app.Configuration.GetValue<bool>("MediaStorage:DisableUploads"))
+    app.MapPublicationMedia();
+app.MapPropertyPublications();
+app.MapBilling();
+app.MapAnalytics();
+app.MapRealizedDeals();
+app.MapChat();
+app.MapWebsiteConfig();
+app.MapHub<ChatHub>("/hubs/chat");
+
+var webRoot = app.Environment.WebRootPath ?? Path.Combine(app.Environment.ContentRootPath, "wwwroot");
+if (File.Exists(Path.Combine(webRoot, "index.html")))
+{
+    app.MapFallback("/{*path:nonfile}", (HttpContext context) =>
+        context.Request.Path.StartsWithSegments("/api")
+            ? Results.NotFound()
+            : Results.File(Path.Combine(webRoot, "index.html"), "text/html"));
+}
+
+static RateLimitPartition<string> CreateIpLimiter(HttpContext context, int permitLimit) =>
+    RateLimitPartition.GetFixedWindowLimiter(
+        context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+        _ => new FixedWindowRateLimiterOptions
+        {
+            PermitLimit = permitLimit,
+            Window = TimeSpan.FromMinutes(1),
+            QueueLimit = 0,
+            AutoReplenishment = true
+        });
+
+app.Run();
+
+public partial class Program { }

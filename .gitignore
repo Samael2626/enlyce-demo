@@ -1,0 +1,69 @@
+## .NET
+bin/
+obj/
+*.user
+*.suo
+.vs/
+*.DotSettings.user
+TestResults/
+
+## NuGet
+packages/
+
+## IDE
+.idea/
+*.swp
+*~
+
+## OS
+Thumbs.db
+.DS_Store
+
+## User secrets
+secrets.json
+
+## EF Migrations: los .Designer.cs son OBLIGATORIOS.
+## Llevan el atributo [Migration] y el snapshot del modelo destino;
+## sin ellos EF ignora la migracion y no aplica los cambios.
+
+## Build results
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+[Aa][Rr][Mm]/
+[Aa][Rr][Mm]64/
+bld/
+[Bb]in/
+[Oo]bj/
+[Ll]og/
+[Ll]ogs/
+
+## Visual Studio
+*.rsuser
+*.sln.docuser
+
+## Windows
+*.pdb
+
+## Publish
+publish/
+
+## Node
+web/node_modules/
+web/dist/
+frontend/node_modules/
+frontend/dist/
+
+# Medios generados por LocalMediaStorage
+src/Enlyce.Api/wwwroot/media/
+
+# Herramientas locales: binario PlantUML no versionado
+tools/plantuml/*.jar
+
+# Reportes locales de escaneo ofensivo
+security-reports/
+graphify-out/
+
+# Informes privados de inventario; no publicar ni versionar datos comerciales.
+.local/catalogo-revision/

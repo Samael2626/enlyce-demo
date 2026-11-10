@@ -1,0 +1,216 @@
+import { createServer } from "node:http";
+
+const port = Number(process.env.E2E_API_PORT ?? 5198);
+const requests = [];
+
+const property = {
+  id: "2b76d76d-8ca4-4b34-8ce4-0f6040dc514f",
+  slug: "apartamento-laureles",
+  publicTitle: "Apartamento amplio en Laureles",
+  propertyType: "Apartamento",
+  operation: "Venta",
+  price: { amount: 420000000, currency: "COP" },
+  location: {
+    municipality: "Medellín",
+    neighborhood: "Laureles",
+    approximateLatitude: 6.2442,
+    approximateLongitude: -75.5937,
+  },
+  areaSquareMeters: 92,
+  bedrooms: 3,
+  bathrooms: 2,
+  parkingSpaces: 1,
+  coverPhoto: { url: "/brochure/interior-lujo.jpg", altText: "Sala del apartamento" },
+  publishedAt: "2026-01-15T12:00:00Z",
+};
+
+const detail = {
+  id: property.id,
+  publicationId: "14e14f4c-2f54-41e8-8be4-943239e7b8a6",
+  slug: property.slug,
+  publicTitle: property.publicTitle,
+  publicDescription: "Apartamento iluminado en el sector de Laureles.",
+  propertyType: property.propertyType,
+  operation: property.operation,
+  price: property.price,
+  administrationFee: { amount: 350000, currency: "COP" },
+  location: property.location,
+  features: {
+    areaSquareMeters: property.areaSquareMeters,
+    bedrooms: property.bedrooms,
+    bathrooms: property.bathrooms,
+    parkingSpaces: property.parkingSpaces,
+    stratum: 5,
+    amenities: ["Balcón", "Ascensor"],
+  },
+  photos: [
+    { url: "/brochure/interior-lujo.jpg", altText: "Sala del apartamento", order: 0, isCover: true },
+    { url: "/brochure/fachada-cristal.jpg", altText: "Fachada del edificio", order: 1, isCover: false },
+    { url: "/brochure/casa-contemporanea.jpg", altText: "Zona social", order: 2, isCover: false },
+  ],
+  advisor: {
+    id: "6e4f8517-8e81-467a-b487-1acfe7af7d96",
+    displayName: "Asesor de prueba",
+    publicPhone: null,
+  },
+  publishedAt: property.publishedAt,
+};
+
+function sendJson(response, status, body) {
+  response.writeHead(status, {
+    "Content-Type": "application/json; charset=utf-8",
+    "Access-Control-Allow-Origin": "http://127.0.0.1:3301",
+    "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type, Accept",
+  });
+  response.end(JSON.stringify(body));
+}
+
+async function readJson(request) {
+  let raw = "";
+  for await (const chunk of request) raw += chunk;
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return { _invalidJson: raw };
+  }
+}
+
+const server = createServer(async (request, response) => {
+  const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
+  const { method } = request;
+
+  if (method === "OPTIONS") {
+    response.writeHead(204, {
+      "Access-Control-Allow-Origin": "http://127.0.0.1:3301",
+      "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type, Accept",
+    });
+    return response.end();
+  }
+
+  if (method === "GET" && url.pathname === "/health") {
+    return sendJson(response, 200, { status: "ok" });
+  }
+
+  if (method === "GET" && url.pathname === "/api/public/inmuebles") {
+    const page = Math.max(1, Number.parseInt(url.searchParams.get("page") ?? "1", 10) || 1);
+    const pageSize = Math.max(1, Number.parseInt(url.searchParams.get("pageSize") ?? "12", 10) || 12);
+    if (url.searchParams.get("neighborhood") === "MapaTest") {
+      const fixtures = [
+        property,
+        {
+          ...property,
+          id: "8a6e7d15-65b4-45eb-8d25-c0fba0912fc2",
+          slug: "casa-belén",
+          publicTitle: "Casa de prueba en Belén",
+          location: { ...property.location, neighborhood: "Belén", approximateLatitude: 6.231, approximateLongitude: -75.601 },
+        },
+        {
+          ...property,
+          id: "6ea787e7-0265-432b-a6a9-c7f90e94b48e",
+          slug: "sin-coordenadas",
+          publicTitle: "Publicación sin coordenadas",
+          location: { ...property.location, neighborhood: "Centro", approximateLatitude: 0, approximateLongitude: 0 },
+        },
+      ];
+      const items = page === 1 ? fixtures.slice(0, pageSize) : [];
+      return sendJson(response, 200, { page, pageSize, total: fixtures.length, items });
+    }
+    // Consulta de similares de la ficha: filtra por tipo y devuelve otra publicacion.
+    if (url.searchParams.get("propertyType")) {
+      const similar = { ...property, id: "c1d1e7a2-0b6f-4b55-9a1c-5d2f0f3b9e11", slug: "apartamento-estadio", publicTitle: "Apartamento cerca al Estadio" };
+      return sendJson(response, 200, { page, pageSize, total: 2, items: [property, similar] });
+    }
+    const items = page === 1 ? [property].slice(0, pageSize) : [];
+    return sendJson(response, 200, { page, pageSize, total: 1, items });
+  }
+
+  if (method === "GET" && url.pathname === "/api/public/inmuebles/apartamento-estadio") {
+    return sendJson(response, 200, {
+      ...detail,
+      id: "c1d1e7a2-0b6f-4b55-9a1c-5d2f0f3b9e11",
+      slug: "apartamento-estadio",
+      publicTitle: "Apartamento cerca al Estadio",
+      price: { amount: 380000000, currency: "COP" },
+      features: { ...detail.features, areaSquareMeters: 110, bedrooms: 3 },
+    });
+  }
+
+  if (method === "GET" && url.pathname === "/api/public/inmuebles/apartamento-laureles") {
+    return sendJson(response, 200, detail);
+  }
+
+  if (method === "GET" && url.pathname === "/api/public/inmuebles/apartamento-arriendo") {
+    return sendJson(response, 200, {
+      ...detail,
+      slug: "apartamento-arriendo",
+      operation: "Arriendo",
+      publicTitle: "Apartamento en arriendo",
+    });
+  }
+
+  if (method === "GET" && url.pathname === "/api/public/inmuebles/apartamento-venta-arriendo") {
+    return sendJson(response, 200, {
+      ...detail,
+      slug: "apartamento-venta-arriendo",
+      operation: "VentaYArriendo",
+      publicTitle: "Apartamento en venta y arriendo",
+    });
+  }
+
+  if (method === "GET" && url.pathname === "/api/politica/activa") {
+    return sendJson(response, 200, {
+      id: "7ec2b6db-51bc-40c6-84bd-4b718b4756b0",
+      version: "fixture-1",
+      textoCompleto: "Politica de prueba para ejecucion E2E.",
+      fechaVigencia: "2026-01-01T00:00:00Z",
+    });
+  }
+
+  if (method === "POST" && url.pathname === "/api/public/analytics/events") {
+    return sendJson(response, 202, {});
+  }
+
+  if (method === "POST" && url.pathname === "/api/public/alertas") {
+    requests.push({ method, path: url.pathname, body: await readJson(request) });
+    return sendJson(response, 202, { alertId: "5f0c2a8e-2a0a-4c55-9f3e-0b9d0c1e7a11" });
+  }
+
+  if (method === "POST" && /^\/api\/public\/alertas\/[^/]+\/baja$/.test(url.pathname)) {
+    const body = await readJson(request);
+    requests.push({ method, path: url.pathname, body });
+    if (body?.token !== "firma-valida") return sendJson(response, 404, {});
+    response.writeHead(204, { "Access-Control-Allow-Origin": "http://127.0.0.1:3301" });
+    return response.end();
+  }
+
+  if ((method === "POST" && url.pathname === "/api/leads") ||
+      (method === "PUT" && url.pathname === "/api/leads/owner-details")) {
+    const body = await readJson(request);
+    requests.push({ method, path: url.pathname, body });
+    if (method === "POST") {
+      return sendJson(response, 202, {
+        continuationToken: "e2e-fixture-continuation-token",
+        message: "Solicitud recibida.",
+      });
+    }
+    return sendJson(response, 202, {});
+  }
+
+  if (method === "GET" && url.pathname === "/__test/requests") {
+    return sendJson(response, 200, requests);
+  }
+
+  if (method === "DELETE" && url.pathname === "/__test/requests") {
+    requests.length = 0;
+    return sendJson(response, 200, { cleared: true });
+  }
+
+  return sendJson(response, 404, { title: "Not Found", status: 404 });
+});
+
+server.listen(port, "127.0.0.1", () => {
+  console.log(`E2E mock API listening on http://127.0.0.1:${port}`);
+});

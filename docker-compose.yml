@@ -1,0 +1,47 @@
+# Demo local: todos los valores son ficticios y solo sirven para esta demo.
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: enlyce
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: demo-postgres-pass
+    ports:
+      - "5436:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d enlyce"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  api:
+    build: .
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development   # el seed de catalogo solo corre en Development
+      PORT: "8080"
+      ConnectionStrings__Default: Host=db;Port=5432;Database=enlyce;Username=postgres;Password=demo-postgres-pass
+      JwtSettings__SecretKey: demo-only-jwt-key-not-for-production-0123456789
+      Database__ApplyMigrations: "true"
+      DemoData__SeedPublicCatalog: "true"
+      DemoData__PhotoSourceDirectory: /app/seed-assets
+      Auth__BootstrapAdmin__Enabled: "true"
+      Auth__BootstrapAdmin__Email: admin@enlyce.test
+      Auth__BootstrapAdmin__Password: DemoEnlyce2026!!
+      MediaStorage__PublicBaseUrl: http://localhost:5019
+      Cors__AllowedOrigins__0: http://localhost:3000
+    ports:
+      - "5019:8080"
+
+  web:
+    build:
+      context: website/sitio
+      args:
+        NEXT_PUBLIC_API_URL: http://localhost:5019
+        NEXT_PUBLIC_SITE_URL: http://localhost:3000
+    depends_on:
+      - api
+    ports:
+      - "3000:3000"

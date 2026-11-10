@@ -1,0 +1,77 @@
+using Enlyce.Application.Alerts;
+using Enlyce.Application.Abstractions;
+using Enlyce.Application.Analytics;
+using Enlyce.Application.Billing;
+using Enlyce.Application.Commands.Consentimiento;
+using Enlyce.Application.Commands.Lead;
+using Enlyce.Application.Commands.Login;
+using Enlyce.Application.Commands.RegisterAsesor;
+using Enlyce.Application.Imports;
+using Enlyce.Application.Queries.Lead;
+using Enlyce.Application.Queries.Politica;
+using Enlyce.Application.PublicCatalog;
+using Enlyce.Application.Publications;
+using Enlyce.Application.UseCases.CreateInmueble;
+using Enlyce.Application.UseCases.UpdateInmueble;
+using Enlyce.Application.UseCases.ManageInmuebleTrash;
+using Enlyce.Application.UseCases.CreateLead;
+using Enlyce.Application.UseCases.EnrichOwnerInquiry;
+using Enlyce.Application.UseCases.GetInmuebleById;
+using Enlyce.Application.UseCases.ListInmuebles;
+using Enlyce.Application.UseCases.GetLeadById;
+using Enlyce.Application.UseCases.UploadPublicationPhoto;
+using Microsoft.Extensions.DependencyInjection;
+
+namespace Enlyce.Application;
+
+public static class DependencyInjection
+{
+    public static IServiceCollection AddApplication(this IServiceCollection services)
+    {
+        services.AddSingleton<TimeProvider>(TimeProvider.System);
+        services.AddScoped<ICommandHandler<RecordWebAnalyticsEventCommand>, RecordWebAnalyticsEventHandler>();
+        services.AddScoped<IQueryHandler<GetWebAnalyticsFunnelQuery, WebAnalyticsFunnelResponse>, GetWebAnalyticsFunnelHandler>();
+        services.AddScoped<GetFirstResponseMetricsHandler>();
+        services.AddScoped<ICommandHandler<CreateCheckoutSessionCommand, CreateCheckoutSessionResponse>, CreateCheckoutSessionHandler>();
+        services.AddScoped<ProcessPaymentNotificationHandler>();
+        services.AddScoped<ICommandHandler<CreateLeadCommand, CreateLeadResponse>, CreateLeadHandler>();
+        services.AddScoped<ICommandHandler<CreateSearchAlertCommand, CreateSearchAlertResponse>, CreateSearchAlertHandler>();
+        services.AddScoped<ICommandHandler<UnsubscribeSearchAlertCommand, bool>, UnsubscribeSearchAlertHandler>();
+        services.AddScoped<IPublicationAlertDispatcher, PublicationAlertDispatcher>();
+        services.AddScoped<ICommandHandler<EnrichOwnerInquiryCommand, OwnerInquiryDetailsResponse?>, EnrichOwnerInquiryHandler>();
+        services.AddScoped<ICommandHandler<CreateInmuebleCommand, CreateInmuebleResponse>, CreateInmuebleHandler>();
+        services.AddScoped<ICommandHandler<UpdateInmuebleCommand, CreateInmuebleResponse?>, UpdateInmuebleHandler>();
+        services.AddScoped<ICommandHandler<ChangeInmuebleTrashStateCommand, bool>, ChangeInmuebleTrashStateHandler>();
+        services.AddScoped<ICommandHandler<ChangeInmueblesTrashStateCommand, bool>, ChangeInmueblesTrashStateHandler>();
+        services.AddScoped<ICommandHandler<UploadPublicationPhotoCommand, UploadPublicationPhotoResponse>, UploadPublicationPhotoHandler>();
+        services.AddScoped<IQueryHandler<GetLeadByIdQuery, GetLeadByIdResponse?>, GetLeadByIdHandler>();
+        services.AddScoped<IQueryHandler<GetInmuebleByIdQuery, GetInmuebleByIdResponse?>, GetInmuebleByIdHandler>();
+        services.AddScoped<IQueryHandler<ListInmueblesQuery, ListInmueblesResponse>, ListInmueblesHandler>();
+        services.AddScoped<IQueryHandler<GetPublicPropertiesQuery, PublicPropertyPageResponse>, GetPublicPropertiesHandler>();
+        services.AddScoped<IQueryHandler<GetPublicPropertyBySlugQuery, PublicPropertyDetailResponse?>, GetPublicPropertyBySlugHandler>();
+        services.AddScoped<IQueryHandler<GetPropertyPublicationsQuery, IReadOnlyList<PropertyPublicationAdminData>>, GetPropertyPublicationsHandler>();
+        services.AddScoped<IQueryHandler<GetPropertyPublicationOptionsQuery, PropertyPublicationOptions>, GetPropertyPublicationOptionsHandler>();
+        services.AddScoped<ICommandHandler<CreatePropertyPublicationCommand, PropertyPublicationMutationResponse>, CreatePropertyPublicationHandler>();
+        services.AddScoped<ICommandHandler<UpdatePropertyPublicationCommand, PropertyPublicationMutationResponse>, UpdatePropertyPublicationHandler>();
+        services.AddScoped<ICommandHandler<ChangePropertyPublicationStatusCommand, PropertyPublicationMutationResponse>, ChangePropertyPublicationStatusHandler>();
+
+        services.AddScoped<LoginCommandHandler>();
+        services.AddScoped<RegisterAsesorCommandHandler>();
+
+        services.AddScoped<RegistrarConsentimientoHandler>();
+        services.AddScoped<ObtenerPoliticaActivaHandler>();
+        services.AddScoped<ConsultarDatosLeadHandler>();
+        services.AddScoped<SuprimirDatosLeadHandler>();
+
+        services.AddScoped<MoverEtapaHandler>();
+        services.AddScoped<AsignarLeadHandler>();
+        services.AddScoped<ReasignarLeadHandler>();
+        services.AddScoped<RegistrarInteraccionHandler>();
+        services.AddScoped<RegistrarVisitaHandler>();
+        services.AddScoped<ConsultarPipelineHandler>();
+        services.AddScoped<ObtenerAlertasHandler>();
+        services.AddScoped<ObtenerAlertasSlaHandler>();
+
+        return services;
+    }
+}

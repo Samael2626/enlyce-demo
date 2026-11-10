@@ -1,0 +1,154 @@
+using Enlyce.Domain.Entities;
+using Enlyce.Domain.Media;
+using Enlyce.Domain.Ports;
+using Enlyce.Domain.ValueObjects;
+using Enlyce.Infrastructure.Persistence;
+using Microsoft.EntityFrameworkCore;
+
+namespace Enlyce.Api.Development;
+
+public static class DemoCatalogSeeder
+{
+    private const string OwnerEmail = "catalogo.demo@enlyce.test";
+    private const string AdvisorEmail = "asesor.demo@enlyce.test";
+
+    private static readonly DemoProperty[] Properties =
+    [
+        new("apartamento-laureles-estadio", "Apartamento amplio en Laureles", "Espacios iluminados, balcón y ubicación residencial cerca de servicios.", TipoInmueble.Apartamento, ModalidadInmueble.Venta, "Medellín", "Laureles", 780_000_000m, 118, 3, 3, 2, 6.244m, -75.593m),
+        new("apartamento-el-poblado", "Apartamento contemporáneo en El Poblado", "Vista urbana, distribución abierta y acceso rápido a la zona empresarial.", TipoInmueble.Apartamento, ModalidadInmueble.Venta, "Medellín", "El Poblado", 1_180_000_000m, 142, 3, 3, 2, 6.209m, -75.565m),
+        new("apartamento-belen", "Apartamento familiar en Belén", "Vivienda funcional con zonas generosas y rutas de transporte cercanas.", TipoInmueble.Apartamento, ModalidadInmueble.Arriendo, "Medellín", "Belén", 3_400_000m, 91, 3, 2, 1, 6.231m, -75.603m),
+        new("casa-envigado-loma-esmeraldal", "Casa tranquila en Loma del Esmeraldal", "Casa de varios niveles con terraza, estudio y entorno verde.", TipoInmueble.Casa, ModalidadInmueble.Venta, "Envigado", "Loma del Esmeraldal", 1_650_000_000m, 248, 4, 4, 3, 6.171m, -75.577m),
+        new("apartamento-envigado-zuniga", "Apartamento moderno en Zúñiga", "Acabados sobrios, buena iluminación y cercanía a comercio local.", TipoInmueble.Apartamento, ModalidadInmueble.Arriendo, "Envigado", "Zúñiga", 5_200_000m, 126, 3, 3, 2, 6.178m, -75.584m),
+        new("apartamento-sabaneta-asdesillas", "Apartamento con vista en Asdesillas", "Ambiente residencial, balcón panorámico y espacios bien aprovechados.", TipoInmueble.Apartamento, ModalidadInmueble.Venta, "Sabaneta", "Asdesillas", 590_000_000m, 86, 3, 2, 1, 6.145m, -75.605m),
+        new("casa-sabaneta-canaveralejo", "Casa familiar en Cañaveralejo", "Patio, estudio y áreas independientes para una familia en crecimiento.", TipoInmueble.Casa, ModalidadInmueble.Venta, "Sabaneta", "Cañaveralejo", 920_000_000m, 176, 4, 3, 2, 6.151m, -75.616m),
+        new("oficina-ciudad-del-rio", "Oficina flexible en Ciudad del Río", "Planta adaptable para equipos pequeños cerca de servicios empresariales.", TipoInmueble.Oficina, ModalidadInmueble.Arriendo, "Medellín", "Ciudad del Río", 4_800_000m, 74, 0, 2, 2, 6.223m, -75.573m),
+        new("local-comercial-la-america", "Local comercial en La América", "Frente visible y espacio versátil para comercio o servicios.", TipoInmueble.Local, ModalidadInmueble.Arriendo, "Medellín", "La América", 3_100_000m, 62, 0, 1, 0, 6.252m, -75.609m),
+        new("bodega-itagui-santa-maria", "Bodega operativa en Santa María", "Área abierta, acceso vehicular y ubicación industrial estratégica.", TipoInmueble.Bodega, ModalidadInmueble.Arriendo, "Itagüí", "Santa María", 12_500_000m, 510, 0, 3, 4, 6.185m, -75.608m),
+        new("lote-las-palmas", "Lote con entorno natural en Las Palmas", "Terreno inclinado con visuales abiertas y acceso desde vía secundaria.", TipoInmueble.Lote, ModalidadInmueble.Venta, "Medellín", "Las Palmas", 1_350_000_000m, 1_850, 0, 0, 0, 6.187m, -75.537m),
+        new("finca-copacabana-el-cabuyal", "Finca de recreo en El Cabuyal", "Casa principal, árboles maduros y espacio exterior para descanso.", TipoInmueble.Finca, ModalidadInmueble.Venta, "Copacabana", "El Cabuyal", 1_090_000_000m, 2_600, 4, 3, 5, 6.337m, -75.508m),
+    ];
+
+    // Fotos de origen del catalogo sintetico. Solo hay dos assets utiles; las
+    // fotos reales siguen pendientes de entrega por Enlyce.
+    private static readonly string[] SourcePhotos =
+    [
+        "property-triptych.png",
+        "medellin-hero.png",
+        "property-triptych.png"
+    ];
+
+    public static async Task SeedAsync(
+        EnlyceDbContext db,
+        IMediaStorage storage,
+        string photoSourceDirectory,
+        CancellationToken cancellationToken = default)
+    {
+        var demoSlugs = Properties.Select(item => item.Slug).ToArray();
+        var existingSlugs = await db.PropertyPublications
+            .Where(item => demoSlugs.Contains(item.Slug))
+            .Select(item => item.Slug)
+            .ToListAsync(cancellationToken);
+
+        if (existingSlugs.Count == Properties.Length)
+            return;
+
+        var owner = await db.Propietarios
+            .SingleOrDefaultAsync(item => item.Email.Value == OwnerEmail, cancellationToken);
+        if (owner is null)
+        {
+            owner = Propietario.Crear("Propietario sintético del catálogo", Email.Create(OwnerEmail));
+            db.Propietarios.Add(owner);
+        }
+
+        var advisor = await db.Asesores
+            .SingleOrDefaultAsync(item => item.Correo.Value == AdvisorEmail, cancellationToken);
+        if (advisor is null)
+        {
+            advisor = Asesor.Crear("Equipo Enlyce", Email.Create(AdvisorEmail), "demo-account-without-login");
+            db.Asesores.Add(advisor);
+        }
+
+        var existing = existingSlugs.ToHashSet(StringComparer.Ordinal);
+        foreach (var spec in Properties.Where(item => !existing.Contains(item.Slug)))
+        {
+            var property = Inmueble.Crear(
+                spec.Title,
+                spec.Description,
+                spec.Type,
+                spec.Operation,
+                Direccion.Crear($"Dirección sintética {spec.Slug}", spec.Municipality, spec.Neighborhood),
+                Dinero.Crear(spec.Price),
+                spec.Area,
+                spec.Bedrooms,
+                spec.Bathrooms,
+                spec.ParkingSpaces,
+                owner.Id);
+
+            var publication = PropertyPublication.Create(
+                property.Id,
+                advisor.Id,
+                spec.Slug,
+                spec.Title,
+                spec.Description);
+            publication.SetPublicPrice(spec.Price);
+            publication.SetPublicLocation(spec.Municipality, spec.Neighborhood, spec.Latitude, spec.Longitude);
+            await AddPhotosAsync(publication, spec, storage, photoSourceDirectory, cancellationToken);
+            publication.Publish();
+
+            db.Inmuebles.Add(property);
+            db.PropertyPublications.Add(publication);
+        }
+
+        await db.SaveChangesAsync(cancellationToken);
+    }
+
+    private static async Task AddPhotosAsync(
+        PropertyPublication publication,
+        DemoProperty spec,
+        IMediaStorage storage,
+        string photoSourceDirectory,
+        CancellationToken cancellationToken)
+    {
+        string[] altTexts =
+        [
+            $"Vista principal de {spec.Title}",
+            $"Entorno de {spec.Neighborhood}",
+            $"Detalle interior de {spec.Title}"
+        ];
+
+        for (var index = 0; index < SourcePhotos.Length; index++)
+        {
+            var path = Path.Combine(photoSourceDirectory, SourcePhotos[index]);
+            if (!File.Exists(path))
+                throw new InvalidOperationException(
+                    $"Falta la imagen de demostracion '{path}'. Configure DemoData:PhotoSourceDirectory.");
+
+            await using var content = File.OpenRead(path);
+            var upload = MediaUpload.Create(
+                publication.Id,
+                SourcePhotos[index],
+                "image/png",
+                content.Length,
+                content);
+
+            var stored = await storage.StoreAsync(upload, cancellationToken);
+            publication.AddPhoto(stored.Url, altTexts[index], index, index == 0);
+        }
+    }
+
+    private sealed record DemoProperty(
+        string Slug,
+        string Title,
+        string Description,
+        TipoInmueble Type,
+        ModalidadInmueble Operation,
+        string Municipality,
+        string Neighborhood,
+        decimal Price,
+        int Area,
+        int Bedrooms,
+        int Bathrooms,
+        int ParkingSpaces,
+        decimal Latitude,
+        decimal Longitude);
+}

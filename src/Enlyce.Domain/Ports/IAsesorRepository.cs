@@ -1,0 +1,15 @@
+using Enlyce.Domain.Entities;
+
+namespace Enlyce.Domain.Ports;
+
+public interface IAsesorRepository
+{
+    Task<Asesor?> ObtenerPorCorreoAsync(string correo);
+    Task<Asesor?> ObtenerPorIdAsync(Guid id);
+    Task<bool> ExisteCorreoAsync(string correo);
+    Task AgregarAsync(Asesor asesor);
+    Task GuardarAsync(Asesor asesor);
+    Task<List<Asesor>> ObtenerTodosAsync();
+    Task<Guid?> ObtenerAsesorConMenosOportunidadesAbiertasAsync(CancellationToken ct = default);
+    Task<Guid?> ObtenerSiguienteAsesorEnRotacionAsync(CancellationToken ct = default);
+}
