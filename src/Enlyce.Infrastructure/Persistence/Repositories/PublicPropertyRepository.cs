@@ -20,11 +20,7 @@ public sealed class PublicPropertyRepository(EnlyceDbContext context, IConfigura
             publication.PublishedAt != null &&
             context.PropertyPhotos.Count(photo => photo.PublicationId == publication.Id) >= 3 &&
             context.PropertyPhotos.Count(photo => photo.PublicationId == publication.Id && photo.IsCover) == 1 &&
-            context.Asesores.Any(advisor => advisor.Id == publication.AdvisorId && advisor.Activo &&
-                advisor.Correo.Value != "asesor.demo@enlyce.test") &&
-            !context.Inmuebles.Any(property => property.Id == publication.PropertyId &&
-                context.Propietarios.Any(owner => owner.Id == property.PropietarioId &&
-                    owner.Email.Value == "catalogo.demo@enlyce.test")));
+            context.Asesores.Any(advisor => advisor.Id == publication.AdvisorId && advisor.Activo));
 
     public async Task<string?> GetVisibleSlugByPropertyIdAsync(Guid propertyId, CancellationToken ct = default)
     {

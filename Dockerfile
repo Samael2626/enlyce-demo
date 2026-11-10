@@ -17,5 +17,5 @@ ENV ASPNETCORE_ENVIRONMENT=Production
 COPY --from=api-build /app/publish ./
 COPY --from=api-build /src/website/assets ./seed-assets
 COPY --from=frontend-build /build/frontend/dist ./wwwroot/
-EXPOSE 8080
-ENTRYPOINT ["sh", "-c", "ASPNETCORE_URLS=http://0.0.0.0:${PORT:-8080} dotnet Enlyce.Api.dll"]
+EXPOSE 5019
+ENTRYPOINT ["sh", "-c", "ASPNETCORE_URLS=http://0.0.0.0:${PORT:-5019} dotnet Enlyce.Api.dll"]

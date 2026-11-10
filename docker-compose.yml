@@ -21,10 +21,11 @@ services:
         condition: service_healthy
     environment:
       ASPNETCORE_ENVIRONMENT: Development   # el seed de catalogo solo corre en Development
-      PORT: "8080"
+      PORT: "5019"
       ConnectionStrings__Default: Host=db;Port=5432;Database=enlyce;Username=postgres;Password=demo-postgres-pass
       JwtSettings__SecretKey: demo-only-jwt-key-not-for-production-0123456789
       Database__ApplyMigrations: "true"
+      PublicCatalog__Enabled: "true"
       DemoData__SeedPublicCatalog: "true"
       DemoData__PhotoSourceDirectory: /app/seed-assets
       Auth__BootstrapAdmin__Enabled: "true"
@@ -33,7 +34,8 @@ services:
       MediaStorage__PublicBaseUrl: http://localhost:5019
       Cors__AllowedOrigins__0: http://localhost:3000
     ports:
-      - "5019:8080"
+      - "5019:5019"
+      - "3000:3000"   # publicado aqui porque la web comparte la red de la API
 
   web:
     build:
@@ -43,5 +45,5 @@ services:
         NEXT_PUBLIC_SITE_URL: http://localhost:3000
     depends_on:
       - api
-    ports:
-      - "3000:3000"
+    # Comparte la red de la API: el SSR de Next y el navegador usan la misma URL (localhost:5019).
+    network_mode: "service:api"

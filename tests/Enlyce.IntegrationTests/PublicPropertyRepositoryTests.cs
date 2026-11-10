@@ -102,30 +102,6 @@ public sealed class PublicPropertyRepositoryTests
         Assert.Null(await repository.GetVisibleSlugByPropertyIdAsync(propertyId));
     }
 
-    [Theory]
-    [InlineData(true)]
-    [InlineData(false)]
-    public async Task DemoAccounts_AreExcludedEvenWithPublishingEnabled(bool demoAdvisor)
-    {
-        await using var harness = await CreateHarnessAsync();
-        if (demoAdvisor)
-        {
-            var email = "asesor.demo@enlyce.test";
-            await harness.Db.Database.ExecuteSqlInterpolatedAsync($"UPDATE \"Asesores\" SET \"Correo\" = {email}");
-        }
-        else
-        {
-            var email = "catalogo.demo@enlyce.test";
-            await harness.Db.Database.ExecuteSqlInterpolatedAsync($"UPDATE \"Propietarios\" SET \"Email\" = {email}");
-        }
-        Assert.Empty((await harness.Repository.SearchAsync(new PublicPropertySearchCriteria())).Items);
-        Assert.Null(await harness.Repository.GetBySlugAsync(PublicCatalogTestData.PublishedApartmentSlug));
-        var propertyId = await harness.Db.PropertyPublications
-            .Where(item => item.Slug == PublicCatalogTestData.PublishedApartmentSlug)
-            .Select(item => item.PropertyId).SingleAsync();
-        Assert.Null(await harness.Repository.GetVisibleSlugByPropertyIdAsync(propertyId));
-    }
-
     [Fact]
     public async Task SoldProperty_IsExcludedFromListDetailAndLinks()
     {

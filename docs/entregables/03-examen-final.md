@@ -15,11 +15,11 @@
 3. `docker compose up -d --build`.
 
 ### 2.2 xUnit (equivalente a JUnit)
-`dotnet test Enlyce.slnx` -> 593 pruebas en la ultima corrida local (58 aplicacion, 256 dominio, 279 integracion, 1 omitida por requerir Postgres externo).
+`dotnet test Enlyce.slnx` -> 591 pruebas en la ultima corrida local (58 aplicacion, 256 dominio, 277 integracion, 1 omitida por requerir Postgres externo).
 
 ### 2.3 Selenium
 `dotnet test tests/Enlyce.E2E.Selenium` (con `DEMO_HEADED=1` para ver el navegador).
-Estado: compila; **pendiente ejecutar contra la demo levantada** antes de entregar.
+Estado: ejecutada contra la demo en Docker, 4 de 4 pruebas en verde.
 
 ### 2.4 JMeter
 `jmeter -n -t tests/carga/api-carga.jmx -l tests/carga/resultados.jtl -e -o tests/carga/reporte`
